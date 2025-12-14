@@ -1,0 +1,8 @@
+torch
+requests
+wandb
+tensorboard
+torchviz
+graphviz
+numpy
+typing_extensions

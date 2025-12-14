@@ -1,0 +1,8 @@
+*.txt
+!requirements.txt
+/tokenizer/.gitignore
+/tokenizer/target
+tokenizer/.idea
+test.py
+verify_installation.py
+*__pycache__

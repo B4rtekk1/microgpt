@@ -1,0 +1,14 @@
+[package]
+name = "unitokenizer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pyo3 = { version = "0.27.2", features = ["extension-module"] }
+pyo3-log = "0.13.2"
+ahash = "0.8"
+compact_str = "0.9.0"
+fancy-regex = "0.17.0"
+once_cell = "1.19"
+parking_lot = "0.12"
+rayon = "1.8"
