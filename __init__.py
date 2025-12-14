@@ -48,8 +48,6 @@ from .logger import (
     get_logger,
 )
 
-from .tokenizer import Tokenizer
-
 __all__ = [
     # Version
     "__version__",
@@ -67,17 +65,15 @@ __all__ = [
     "KVCache",
     
     # Training
-    "create_optimizer",
     "create_lr_scheduler",
     "WarmupCosineScheduler",
     "GradientAccumulator",
     "initialize_weights",
     "mark_residual_layers",
-    "count_parameters",
+    "count_params",
     "model_size_mb",
     
     # Sophia optimizer
-    "Sophia",
     "SophiaG",
     "SophiaH",
     "create_sophia_optimizer",
@@ -91,13 +87,10 @@ __all__ = [
     "ModelConfig",
     "HardwareInfo",
     "GPUArchitecture",
-    "AttentionImplementation",
     "DistributedStrategy",
 
-    "BaseLogger",
+    "Logger",
     "TrainingLogger",
     "MetricsLogger",
     "get_logger",
-
-    "Tokenizer",
 ]
