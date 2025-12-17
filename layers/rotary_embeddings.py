@@ -46,7 +46,7 @@ class RotaryEmbedding(nn.Module):
         Args:
             seq_len: Sequence length to compute cache for.
         """
-        t = torch.arange(seq_len, dtype=self.inv_freq, device=self.inv_freq.device) #type: ignore
+        t = torch.arange(seq_len, dtype=self.inv_freq.dtype, device=self.inv_freq.device) #type: ignore
         freqs = torch.outer(t, self.inv_freq) #type: ignore
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos(), persistent=False)
@@ -61,6 +61,8 @@ class RotaryEmbedding(nn.Module):
 
         Returns:
             Tuple of (cos, sin) tensors tailored to the input sequence length.
+            - cos: [seq_len, head_dim/2] or [1, seq_len, head_dim/2]
+            - sin: [seq_len, head_dim/2] or [1, seq_len, head_dim/2]
         """
         seq_len = x.shape[1]
         if seq_len > self.cos_cached.shape[0]: #type: ignore
@@ -78,7 +80,7 @@ class RotaryEmbedding(nn.Module):
         """Rotates half the hidden dims of the input."""
         x1 = x[..., :x.shape[-1]//2]
         x2 = x[..., x.shape[-1]//2:]
-        return torch.cat((-x2, x1), dim=1)
+        return torch.cat((-x2, x1), dim=-1)
     
     @staticmethod
     def apply_rotary_pos_emb(
@@ -97,6 +99,8 @@ class RotaryEmbedding(nn.Module):
 
         Returns:
             Tuple of (q_embed, k_embed) with rotary embeddings applied.
+            - q_embed: [batch, seq_len, n_heads, head_dim]
+            - k_embed: [batch, seq_len, n_kv_heads, head_dim]
         """
         if cos.dim() == 2:
             cos = cos.unsqueeze(0).unsqueeze(0)

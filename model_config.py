@@ -55,6 +55,8 @@ class ModelConfig:
     variance_epsilon: float = 1e-9
     use_checkpoints: Optional[bool] = True
     use_drop_path: Optional[bool] = False
+    drop_path_rate: Optional[float] = 0.0
+    layer_scale_init: Optional[float] = 1e-5
 
     use_relative_position_bias: Optional[bool] = False
     rel_pos_num_buckets: Optional[int] = 32
@@ -369,7 +371,7 @@ class ModelConfig:
             'n_heads': 12,
             'n_kv_heads': 12,
             'n_embd': 768,
-            'dropout': 0.1,
+            'dropout_rate': 0.1,
             'max_position_embeddings': 1024,
             'base': 10000,
         }
@@ -394,7 +396,7 @@ class ModelConfig:
             'n_heads': 16,
             'n_kv_heads': 16,
             'n_embd': 1024,
-            'dropout': 0.1,
+            'dropout_rate': 0.1,
             'max_position_embeddings': 1024,
             'base': 10000,
         }
@@ -419,7 +421,7 @@ class ModelConfig:
             'n_heads': 20,
             'n_kv_heads': 20,
             'n_embd': 1280,
-            'dropout': 0.1,
+            'dropout_rate': 0.1,
             'max_position_embeddings': 1024,
             'base': 10000,
         }
@@ -444,7 +446,7 @@ class ModelConfig:
             'n_heads': 25,
             'n_kv_heads': 25,
             'n_embd': 1600,
-            'dropout': 0.1,
+            'dropout_rate': 0.1,
             'max_position_embeddings': 1024,
             'base': 10000,
         }
@@ -471,7 +473,7 @@ class ModelConfig:
             'n_heads': 32,
             'n_kv_heads': 8,  # GQA
             'n_embd': 4096,
-            'dropout': 0.0,
+            'dropout_rate': 0.0,
             'max_position_embeddings': 4096,
             'base': 10000,
         }
@@ -497,7 +499,7 @@ class ModelConfig:
             'n_heads': 40,
             'n_kv_heads': 8,  # GQA
             'n_embd': 5120,
-            'dropout': 0.0,
+            'dropout_rate': 0.0,
             'max_position_embeddings': 4096,
             'base': 10000,
         }
@@ -524,7 +526,7 @@ class ModelConfig:
             'n_heads': 32,
             'n_kv_heads': 8,  # GQA
             'n_embd': 4096,
-            'dropout': 0.0,
+            'dropout_rate': 0.0,
             'max_position_embeddings': 32768,
             'base': 10000,
             'sliding_window_size': 4096,  # Sliding window attention
@@ -551,7 +553,7 @@ class ModelConfig:
             'n_heads': 4,
             'n_kv_heads': 4,
             'n_embd': 256,
-            'dropout': 0.1,
+            'dropout_rate': 0.1,
             'max_position_embeddings': 512,
             'base': 10000,
         }
@@ -577,7 +579,7 @@ class ModelConfig:
             'n_heads': 8,
             'n_kv_heads': 8,
             'n_embd': 512,
-            'dropout': 0.1,
+            'dropout_rate': 0.1,
             'max_position_embeddings': 1024,
             'base': 10000,
         }
@@ -603,7 +605,7 @@ class ModelConfig:
             'n_heads': 16,
             'n_kv_heads': 4,  # GQA
             'n_embd': 1024,
-            'dropout': 0.0,
+            'dropout_rate': 0.0,
             'max_position_embeddings': 2048,
             'base': 10000,
         }
@@ -629,7 +631,7 @@ class ModelConfig:
             'n_heads': 24,
             'n_kv_heads': 6,  # GQA
             'n_embd': 1536,
-            'dropout': 0.0,
+            'dropout_rate': 0.0,
             'max_position_embeddings': 4096,
             'base': 10000,
         }

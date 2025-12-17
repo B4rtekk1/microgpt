@@ -515,8 +515,9 @@ class ArchitectureLogger(Logger):
         self.info(row_format.format("Layer (type)", "Input Shape", "Output Shape", "Param #", "Train?"))
         self.separate("-")
         
-        total_params = 0
-        total_trainable = 0
+        # Calculate totals globally to avoid depth-dependent summation issues
+        total_params = sum(p.numel() for p in model.parameters())
+        total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
         for name, stats in layer_stats.items():
             display_name = f"{name} ({stats['class_name']})"
@@ -525,9 +526,6 @@ class ArchitectureLogger(Logger):
             out_shape = str(stats['output_shape']).replace('torch.Size', '') if stats['output_shape'] else "-"
             
             params = stats['params']
-            total_params += params
-            if stats['trainable']:
-                total_trainable += params
             
             tr_flag = "True" if stats['trainable'] else "False"
             
@@ -606,7 +604,7 @@ class TrainingLogger(ArchitectureLogger):
         if not self._should_log:
             return
         if hasattr(config, '__dataclass_fields__'):
-            config = {k: getattr(config, k) for k in config.__dataclass_fields__.keys()} #type: ignore
+            config_dict = {k: getattr(config, k) for k in config.__dataclass_fields__.keys()} #type: ignore
         elif isinstance(config, dict):
             config_dict = config
         else:
@@ -675,7 +673,7 @@ class TrainingLogger(ArchitectureLogger):
         if not self._should_log:
             return
         self.header(f"Finished Epoch {epoch}")
-        metrics_str = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+        metrics_str = " | ".join([f"{k}: {v:.6f}" for k, v in metrics.items()])
         elapsed = self.elapsed_time_str()
         self.info(f"Epoch {epoch} Metrics: {metrics_str} | Elapsed Time: {elapsed}")
 
@@ -717,7 +715,7 @@ class TrainingLogger(ArchitectureLogger):
         
         progress = ((step + 1) / total_steps) * 100
         avg_metrics = self.metric_buffer.get_all_means()
-        metrics_str = " | ".join([f"{k}: {v:.4f}" for k, v in avg_metrics.items()])
+        metrics_str = " | ".join([f"{k}: {v:.6f}" for k, v in avg_metrics.items()])
 
         bar_length = 30
         filled_length = int(bar_length * (step + 1) // total_steps)
@@ -738,7 +736,7 @@ class TrainingLogger(ArchitectureLogger):
         if not self._should_log:
             return
         self.header(f"Validation Results after Epoch {epoch}")
-        metrics_str = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+        metrics_str = " | ".join([f"{k}: {v:.6f}" for k, v in metrics.items()])
         self.info(f"Validation Metrics: {metrics_str}")
         self.separate("-")
     
@@ -907,18 +905,12 @@ class MetricsLogger(TrainingLogger):
             
             log_dir_str = str(tb_dir)
             # Fix for Windows paths with non-ASCII characters (e.g. user names with accents)
-            if os.name == 'nt':
-                try:
-                    buffer_size = ctypes.windll.kernel32.GetShortPathNameW(log_dir_str, None, 0)
-                    if buffer_size > 0:
-                        buffer = ctypes.create_unicode_buffer(buffer_size)
-                        ctypes.windll.kernel32.GetShortPathNameW(log_dir_str, buffer, buffer_size)
-                        log_dir_str = buffer.value
-                except Exception:
-                    pass # Fallback to original path if optimization fails
-
-            self._tb_writer = SummaryWriter(log_dir=log_dir_str)
-            self.info(f"TensorBoard initialized: {tb_dir}")
+            try:
+                self._tb_writer = SummaryWriter(log_dir=log_dir_str)
+                self.info(f"TensorBoard initialized: {tb_dir}")
+            except Exception as e:
+                self.warning(f"Failed to initialize TensorBoard (likely due to path issues): {e}")
+                self.use_tensorboard = False
         except ImportError:
             self.warning("TensorBoard not available. Run: pip install tensorboard")
             self.use_tensorboard = False

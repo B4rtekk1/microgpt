@@ -43,10 +43,10 @@ class SophiaOptimized(Optimizer):
         
         self.hessian_stream = torch.cuda.Stream() if torch.cuda.is_available() else None
         
-        if hasattr(torch, 'compile'):
-            self._compiled_update = torch.compile(self._update_kernel, mode='max-autotune')
-        else:
-            self._compiled_update = self._update_kernel
+        # if hasattr(torch, 'compile'):
+        #     self._compiled_update = torch.compile(self._update_kernel, mode='max-autotune')
+        # else:
+        self._compiled_update = self._update_kernel
         
     
     def __setstate__(self, state):
@@ -212,10 +212,10 @@ class SophiaH(Optimizer):
         )
         super().__init__(params, defaults)
         
-        if hasattr(torch, 'compile'):
-            self._compiled_update = torch.compile(self._update_kernel, mode='max-autotune')
-        else:
-            self._compiled_update = self._update_kernel
+        # if hasattr(torch, 'compile'):
+        #     self._compiled_update = torch.compile(self._update_kernel, mode='max-autotune')
+        # else:
+        self._compiled_update = self._update_kernel
     
     @staticmethod
     def _update_kernel(param, grad, exp_avg, hessian, beta1, beta1_comp,

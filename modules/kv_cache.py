@@ -1,6 +1,16 @@
 import torch
 
 class KVCache:
+    """
+    Key-Value Cache for efficient autoregressive generation in Transformers.
+    
+    Stores the Key and Value tensors for past tokens to avoid recomputing them
+    at each generation step. This significantly speeds up decoding.
+    
+    Concept: "Fast Transformer Decoding: One Write-Head is All You Need"
+    Link: https://arxiv.org/abs/1911.02150 (discusses decoding efficiency)
+    General idea from: "Attention Is All You Need" (https://arxiv.org/abs/1706.03762)
+    """
     def __init__(
             self,
             max_batch_size: int,
@@ -10,6 +20,17 @@ class KVCache:
             device: torch.device = torch.device("cuda" if torch.cuda.is_available() else 'cpu'),
             dtype: torch.dtype = torch.float16
     ):
+        """
+        Initialize the Key-Value Cache.
+
+        Args:
+            max_batch_size (int): Maximum batch size to support.
+            max_seq_len (int): Maximum sequence length to cache.
+            n_kv_heads (int): Number of Key/Value heads.
+            head_dim (int): Dimension of each head.
+            device (torch.device): Device to store the cache on.
+            dtype (torch.dtype): Data type of the cache.
+        """
         self.max_batch_size = max_batch_size
         self.max_seq_len = max_seq_len
         self.n_kv_heads = n_kv_heads
@@ -18,12 +39,27 @@ class KVCache:
         self.dtype = dtype
 
         cache_shape = (max_batch_size, n_kv_heads, max_seq_len, head_dim)
+        # k_cache shape: [max_batch_size, n_kv_heads, max_seq_len, head_dim]
         self.k_cache = torch.zeros(cache_shape, device=self.device, dtype=self.dtype)
+        # v_cache shape: [max_batch_size, n_kv_heads, max_seq_len, head_dim]
         self.v_cache = torch.zeros(cache_shape, device=self.device, dtype=self.dtype)
 
         self.current_len = 0
     
     def update(self, k_new: torch.Tensor, v_new: torch.Tensor, position: int | None = None) -> tuple:
+        """
+        Update the cache with new key/value pairs.
+
+        Args:
+            k_new (torch.Tensor): New keys. Shape: [batch, n_kv_heads, new_seq_len, head_dim]
+            v_new (torch.Tensor): New values. Shape: [batch, n_kv_heads, new_seq_len, head_dim]
+            position (int | None): Starting position for update. If None, appends to current end.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: The updated cache up to the current length.
+                - k_cache: [batch, n_kv_heads, current_len, head_dim]
+                - v_cache: [batch, n_kv_heads, current_len, head_dim]
+        """
         batch_size, _, new_seq_len, _ = k_new.shape
         
         if position is None:
@@ -44,6 +80,17 @@ class KVCache:
         )
 
     def get(self, batch_size: int | None = None) -> tuple:
+        """
+        Get the current content of the cache.
+        
+        Args:
+            batch_size: Optional batch size to slice the cache (default: max_batch_size).
+
+        Returns:
+            Tuple of:
+            - k: [batch_size, n_kv_heads, current_len, head_dim]
+            - v: [batch_size, n_kv_heads, current_len, head_dim]
+        """
         bs = batch_size or self.max_batch_size
         return(
             self.k_cache[:bs, :, :self.current_len, :],
@@ -51,11 +98,22 @@ class KVCache:
         )
 
     def reset(self) -> None:
+        """
+        Reset the cache pointer to 0. Effectively clears the cache.
+        """
         self.current_len = 0
     
     def resize(self, new_max_seq_len: int) -> None:
+        """
+        Resize the cache to a new maximum sequence length.
+        
+        Args:
+            new_max_seq_len (int): New maximum sequence length.
+        """
         if new_max_seq_len < self.max_seq_len:
             return
+        
+        # New shape: [max_batch_size, n_kv_heads, new_max_seq_len, head_dim]
         new_shape = (self.max_batch_size, self.n_kv_heads, new_max_seq_len, self.head_dim)
         new_k_cache = torch.zeros(new_shape, device=self.device, dtype=self.dtype)
         new_v_cache = torch.zeros(new_shape, device=self.device, dtype=self.dtype)

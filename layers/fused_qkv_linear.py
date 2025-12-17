@@ -61,12 +61,12 @@ class FusedQKVLinear(nn.Module):
                 - k: Key tensor of shape (batch, seq_len, n_kv_heads, head_dim)
                 - v: Value tensor of shape (batch, seq_len, n_kv_heads, head_dim)
         """
-        batch_size, seq_len = hidden_states.shape
+        batch_size, seq_len, _ = hidden_states.shape
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split(self._split_sizes, dim=-1)
 
         q = q.view(batch_size, seq_len, self.n_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.n_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.n_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.n_kv_heads, self.head_dim)
         return q, k, v
 

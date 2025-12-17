@@ -18,7 +18,7 @@ static PRE_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 // Special token IDs
-const SPECIAL_TOKENS: &[&str] = &["<PAD>", "<UNK>", "<BOS>", "<EOS>"];
+const SPECIAL_TOKENS: &[&str] = &["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<|system|>"];
 const NUM_BYTE_TOKENS: usize = 256;
 
 // Trie for fast token lookup
@@ -173,7 +173,8 @@ impl UnigramTokenizer {
             let bytes = tok.as_bytes().to_vec();
             self.vocab.push(bytes.clone());
             self.scores.push(0.0);
-            self.special_tokens.insert(CompactString::from(tok), i as u32);
+            self.special_tokens
+                .insert(CompactString::from(tok), i as u32);
             self.trie.insert(&bytes, i as u32);
         }
 
@@ -364,7 +365,12 @@ impl UnigramTokenizer {
         self.trie = new_trie;
     }
 
-    fn train_internal(&mut self, file_path: String, target_vocab_size: usize, min_freq: u32) -> PyResult<()> {
+    fn train_internal(
+        &mut self,
+        file_path: String,
+        target_vocab_size: usize,
+        min_freq: u32,
+    ) -> PyResult<()> {
         self.reset_to_base_vocab();
 
         // Load and count words
@@ -443,7 +449,8 @@ impl UnigramTokenizer {
         self.trie.clear();
 
         // Collect special tokens data before mutating self
-        let special_tokens_data: Vec<(Vec<u8>, u32)> = self.special_tokens
+        let special_tokens_data: Vec<(Vec<u8>, u32)> = self
+            .special_tokens
             .iter()
             .map(|(tok_name, &tok_id)| (tok_name.as_bytes().to_vec(), tok_id))
             .collect();
