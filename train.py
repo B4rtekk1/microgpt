@@ -24,7 +24,7 @@ import platform
 from typing import Optional, Tuple, List, Dict, Any
 from pathlib import Path
 import sys
-import argparse
+
 import json
 from tqdm import tqdm
 from dataclasses import dataclass, field
@@ -130,7 +130,7 @@ class TrainingConfig:
     log_dir: str = "./logs"
     
     # Data settings
-    data_size_mb: int = 100
+    data_size_mb: int = 1000
     val_split: float = 0.1
     dataset_stage: str = "base"  # "base", "sft", or "pre+sft" for two-stage training
     
@@ -594,8 +594,42 @@ class Trainer:
         with self.logger.timer("Data Preparation"):
             loader = DatasetLoader()
             stage = self.training_config.dataset_stage
+            data_dir = current_dir / "data_cache" / stage
+            data_dir.mkdir(parents=True, exist_ok=True)
             
-            # Load data with streaming
+            # Paths for cached data
+            train_bin = data_dir / "train.bin"
+            val_bin = data_dir / "val.bin"
+            
+            # Check if cached data exists
+            if train_bin.exists() and val_bin.exists():
+                self.logger.info(f"Loading cached {stage} dataset from {data_dir}...")
+                train_data = np.fromfile(train_bin, dtype=np.uint16)
+                val_data = np.fromfile(val_bin, dtype=np.uint16)
+                
+                # Validation: check if we have enough data for at least one batch
+                min_required = self.model_config.sequence_length + 1
+                if len(train_data) < min_required or len(val_data) < 2:
+                    self.logger.warning(f"Cached data is too small (train: {len(train_data)}, val: {len(val_data)}). Minimum required for sequence_length={self.model_config.sequence_length}: {min_required}. Discarding cache.")
+                else:
+                    self.train_data = train_data
+                    self.val_data = val_data
+                    self.logger.info(f"Loaded {len(self.train_data) + len(self.val_data):,} tokens from cache.")
+                    
+                    # Still need to load the tokenizer
+                    try:
+                        self.tokenizer = Tokenizer()
+                        self.logger.info("Loaded existing tokenizer.")
+                        # Update config vocab size
+                        if self.tokenizer.vocab_size != self.model_config.vocab_size:
+                            self.logger.info(f"Updating vocab_size from tokenizer: {self.model_config.vocab_size} -> {self.tokenizer.vocab_size}")
+                            self.model_config.vocab_size = self.tokenizer.vocab_size
+                    except Exception as e:
+                        self.logger.warning(f"Could not load existing tokenizer: {e}. If this is a fresh run, delete data_cache.")
+                    
+                    return
+
+            # If not cached, download and tokenize
             if stage == "sft":
                 self.logger.info("Loading SFT dataset (OpenAssistant)...")
             else:
@@ -604,7 +638,7 @@ class Trainer:
             ds = loader.load(stage, streaming=True)
             
             # Collect target amount of data
-            target_size = self.training_config.data_size_mb * 1024 * 1024
+            target_size_bytes = self.training_config.data_size_mb * 1024 * 1024
             current_size = 0
             collected_texts = []
             
@@ -612,7 +646,10 @@ class Trainer:
             if isinstance(ds, dict):
                 iterator = ds.get('train', next(iter(ds.values())))
             
-            for item in tqdm(iterator, desc=f"Collecting {self.training_config.data_size_mb}MB"):
+            pbar = tqdm(desc=f"Collecting {self.training_config.data_size_mb}MB", unit="MB")
+            last_pbar_val = 0
+            
+            for item in iterator:
                 # Format text based on dataset stage
                 if stage == "sft":
                     text = self._format_sft_sample(item)
@@ -625,10 +662,21 @@ class Trainer:
                 collected_texts.append(text)
                 current_size += size
                 
-                if current_size >= target_size:
+                # Update progress bar
+                current_mb = current_size / (1024 * 1024)
+                if int(current_mb) > last_pbar_val:
+                    pbar.update(int(current_mb) - last_pbar_val)
+                    last_pbar_val = int(current_mb)
+                
+                if current_size >= target_size_bytes:
                     break
+            pbar.close()
                     
-            self.logger.info(f"Collected {len(collected_texts)} samples, {current_size / (1024*1024):.2f} MB")
+            actual_size_mb = current_size / (1024*1024)
+            self.logger.info(f"Collected {len(collected_texts)} samples, {actual_size_mb:.2f} MB")
+            
+            if actual_size_mb < self.training_config.data_size_mb - 1:
+                self.logger.warning(f"Requested {self.training_config.data_size_mb}MB but only found {actual_size_mb:.2f}MB in the dataset.")
             
             # Train tokenizer only if requested (typically only during pretraining)
             if train_tokenizer:
@@ -659,8 +707,14 @@ class Trainer:
             else:
                 # Reuse existing tokenizer (for SFT after pretraining)
                 if self.tokenizer is None:
-                    raise ValueError("Cannot reuse tokenizer - no tokenizer has been trained yet!")
-                self.logger.info(f"Reusing existing tokenizer (vocab size: {self.tokenizer.vocab_size})")
+                    # Try loading it if it exists
+                    try:
+                        self.tokenizer = Tokenizer()
+                        self.logger.info(f"Loaded existing tokenizer (vocab size: {self.tokenizer.vocab_size})")
+                    except Exception:
+                        raise ValueError("Cannot reuse tokenizer - no tokenizer has been trained yet and none found on disk!")
+                else:
+                    self.logger.info(f"Reusing existing tokenizer (vocab size: {self.tokenizer.vocab_size})")
             
             # Tokenize dataset with current tokenizer
             self.logger.info(f"Tokenizing {stage.upper()} dataset...")
@@ -677,6 +731,12 @@ class Trainer:
             n = int((1 - self.training_config.val_split) * len(data))
             self.train_data = data[:n]
             self.val_data = data[n:]
+            
+            # Save to cache
+            self.logger.info(f"Caching tokenized data to {data_dir}...")
+            self.train_data.tofile(train_bin)
+            self.val_data.tofile(val_bin)
+            self.logger.info("Successfully cached dataset.")
                 
     def build_model(self):
         """Build and configure the model."""
@@ -1496,100 +1556,130 @@ class Trainer:
 # Main Entry Point
 # =============================================================================
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train picoGPT model")
-    
-    # Training mode
-    parser.add_argument("--mode", type=str, default="fixed", choices=["5h", "fixed", "epochs"],
-                        help="Training mode: '5h' (5 hours), 'fixed' (fixed steps), 'epochs'")
-    parser.add_argument("--max-steps", type=int, default=1000, help="Max training steps (for 'fixed' mode)")
-    parser.add_argument("--max-epochs", type=int, default=10, help="Max epochs (for 'epochs' mode)")
-    parser.add_argument("--target-hours", type=float, default=5.0, help="Target hours (for '5h' mode)")
-    
-    # Model preset
-    parser.add_argument("--model", type=str, default="tiny", 
-                        choices=["tiny", "small", "medium", "large", "gpt2_small", "gpt2_medium"],
-                        help="Model preset to use")
-    parser.add_argument("--vocab-size", type=int, default=4000, help="Vocabulary size")
-    
-    # Dataset selection
-    parser.add_argument("--dataset-stage", type=str, default="base", choices=["base", "mid", "sft", "pre+sft"],
-                        help="Dataset stage: 'base' (pretraining), 'sft' (fine-tuning), 'pre+sft' (two-stage training)")
-    
-    # Two-stage training settings
-    parser.add_argument("--pre-steps", type=int, default=500, help="Pretraining steps (for 'pre+sft' mode)")
-    parser.add_argument("--sft-steps", type=int, default=500, help="SFT steps (for 'pre+sft' mode)")
-    parser.add_argument("--sft-lr", type=float, default=2e-5, help="Learning rate for SFT stage")
-    
-    # Training settings
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
-    parser.add_argument("--grad-accum", type=int, default=1, help="Gradient accumulation steps")
-    parser.add_argument("--lr", type=float, default=8e-4, help="Learning rate")
-    parser.add_argument("--data-size-mb", type=int, default=100, help="Data size in MB to use")
-    parser.add_argument("--optimizer", type=str, default="sophia_g", 
-                        choices=["sophia_g", "sophia_h", "adamw"],
-                        help="Optimizer to use")
-    parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient clipping max norm")
-    
-    # Early stopping
-    parser.add_argument("--early-stopping", type=int, default=0, 
-                        help="Early stopping patience (0 = disabled)")
-    
-    # Resume training
-    parser.add_argument("--resume", type=str, default=None, 
-                        help="Path to checkpoint to resume from")
-    
-    # Logging
-    parser.add_argument("--log-dir", type=str, default="./logs", help="Log directory")
-    parser.add_argument("--debug", action="store_true", help="Debug mode (fewer steps)")
-    
-    return parser.parse_args()
+# =============================================================================
+# CONFIGURATION - All Hardcoded Parameters
+# =============================================================================
 
+# ----------------------
+# MODEL ARCHITECTURE
+# ----------------------
+VOCAB_SIZE = 4000
+SEQUENCE_LENGTH = 512
+NUM_LAYERS = 6
+N_HEADS = 6
+N_KV_HEADS = 6  # For GQA, set lower than N_HEADS (e.g., 4 or 8)
+N_EMBD = 384
+DROPOUT_RATE = 0.1
+MAX_POSITION_EMBEDDINGS = 512
+ROPE_BASE = 10000
 
-def get_model_preset(preset: str, vocab_size: int) -> ModelConfig:
-    """Get model configuration from preset."""
-    presets = {
-        "tiny": ModelConfig.tiny,
-        "small": ModelConfig.small,
-        "medium": ModelConfig.medium,
-        "large": ModelConfig.large,
-        "gpt2_small": ModelConfig.gpt2_small,
-        "gpt2_medium": ModelConfig.gpt2_medium,
-    }
-    
-    if preset not in presets:
-        raise ValueError(f"Unknown preset: {preset}")
-    
-    return presets[preset](vocab_size=vocab_size)
+# Advanced model options
+USE_CHECKPOINTS = True  # Gradient checkpointing
+USE_DROP_PATH = False
+DROP_PATH_RATE = 0.0
+LAYER_SCALE_INIT = 1e-5  # Set to None to disable
+
+# Relative position bias (T5-style)
+USE_RELATIVE_POSITION_BIAS = False
+REL_POS_NUM_BUCKETS = 32
+REL_POS_MAX_DISTANCE = 128
+REL_POS_BIDIRECTIONAL = False
+
+# RoPE scaling
+ROPE_SCALING = None  # Options: None, "linear", "dynamic"
+ROPE_SCALING_FACTOR = 1.0
+
+# ----------------------
+# TRAINING MODE
+# ----------------------
+TRAINING_MODE = "fixed"  # Options: "5h" (time-based), "fixed" (step-based), "epochs"
+MAX_STEPS = 1000
+MAX_EPOCHS = 10
+TARGET_HOURS = 5.0
+
+# ----------------------
+# DATASET SETTINGS
+# ----------------------
+DATASET_STAGE = "base"  # Options: "base", "mid", "sft", "pre+sft"
+DATA_SIZE_MB = 1000
+
+# Two-stage training settings (for "pre+sft" mode)
+PRE_STEPS = 500
+SFT_STEPS = 500
+SFT_LR = 2e-5
+
+# ----------------------
+# TRAINING HYPERPARAMETERS
+# ----------------------
+BATCH_SIZE = 32
+GRAD_ACCUM_STEPS = 1
+LEARNING_RATE = 8e-4
+OPTIMIZER_TYPE = "sophia_g"  # Options: "sophia_g", "sophia_h", "adamw"
+GRAD_CLIP = 1.0
+
+# ----------------------
+# EARLY STOPPING
+# ----------------------
+EARLY_STOPPING_PATIENCE = 0  # 0 = disabled
+
+# ----------------------
+# RESUME TRAINING
+# ----------------------
+RESUME_FROM = None  # Path to checkpoint or None
+
+# ----------------------
+# LOGGING
+# ----------------------
+LOG_DIR = "./logs"
+DEBUG_MODE = False
+
+# =============================================================================
 
 
 def main():
-    args = parse_args()
+    # Create model config from hardcoded values (no presets)
+    model_config = ModelConfig(
+        vocab_size=VOCAB_SIZE,
+        sequence_length=SEQUENCE_LENGTH,
+        num_layers=NUM_LAYERS,
+        n_heads=N_HEADS,
+        n_kv_heads=N_KV_HEADS,
+        n_embd=N_EMBD,
+        dropout_rate=DROPOUT_RATE,
+        max_position_embeddings=MAX_POSITION_EMBEDDINGS,
+        base=ROPE_BASE,
+        use_checkpoints=USE_CHECKPOINTS,
+        use_drop_path=USE_DROP_PATH,
+        drop_path_rate=DROP_PATH_RATE,
+        layer_scale_init=LAYER_SCALE_INIT,
+        use_relative_position_bias=USE_RELATIVE_POSITION_BIAS,
+        rel_pos_num_buckets=REL_POS_NUM_BUCKETS,
+        rel_pos_max_distance=REL_POS_MAX_DISTANCE,
+        rel_pos_bidirectional=REL_POS_BIDIRECTIONAL,
+        rope_scaling=ROPE_SCALING,
+        rope_scaling_factor=ROPE_SCALING_FACTOR,
+    )
     
-    # Create model config
-    model_config = get_model_preset(args.model, args.vocab_size)
-    
-    # Create training config
-    # Debug mode: uses smaller data (10MB) but respects user's max_steps
+    # Create training config from hardcoded values
     training_config = TrainingConfig(
-        mode=args.mode,
-        max_steps=args.max_steps,
-        max_epochs=args.max_epochs,
-        target_hours=args.target_hours,
-        batch_size=args.batch_size,
-        gradient_accumulation_steps=args.grad_accum,
-        learning_rate=args.lr,
-        optimizer_type=args.optimizer,
-        max_grad_norm=args.grad_clip,
-        dataset_stage=args.dataset_stage,
-        pre_steps=args.pre_steps,
-        sft_steps=args.sft_steps,
-        sft_lr=args.sft_lr,
-        early_stopping_patience=args.early_stopping,
-        resume_from=args.resume,
-        data_size_mb=args.data_size_mb if not args.debug else 10,
-        log_dir=args.log_dir,
-        debug=args.debug,
+        mode=TRAINING_MODE,
+        max_steps=MAX_STEPS,
+        max_epochs=MAX_EPOCHS,
+        target_hours=TARGET_HOURS,
+        batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM_STEPS,
+        learning_rate=LEARNING_RATE,
+        optimizer_type=OPTIMIZER_TYPE,
+        max_grad_norm=GRAD_CLIP,
+        dataset_stage=DATASET_STAGE,
+        pre_steps=PRE_STEPS,
+        sft_steps=SFT_STEPS,
+        sft_lr=SFT_LR,
+        early_stopping_patience=EARLY_STOPPING_PATIENCE,
+        resume_from=RESUME_FROM,
+        data_size_mb=DATA_SIZE_MB if not DEBUG_MODE else 10,
+        log_dir=LOG_DIR,
+        debug=DEBUG_MODE,
     )
     
     # Create trainer and run

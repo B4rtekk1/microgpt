@@ -8,6 +8,8 @@ verify_installation.py
 *__pycache__
 train_olek.py
 test_tiny_flow.py
-train_10m.py
 /logs
 /checkpoints
+train_10m.py
+train_simple.py
+train_custom.py
