@@ -1,8 +1,23 @@
-torch
-requests
-wandb
-tensorboard
-torchviz
-graphviz
+# Core
+#torch==2.9.1+cu130
 numpy
 typing_extensions
+
+# Data loading
+datasets
+tqdm
+
+# Tokenizer
+sentencepiece
+
+# Logging & Visualization
+wandb
+tensorboard
+matplotlib
+
+# Optional (for model visualization)
+torchviz
+graphviz
+
+# HTTP requests (for API/scraping if needed)
+requests
