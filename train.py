@@ -199,11 +199,14 @@ class CausalSelfAttention(nn.Module):
         
         if self.config.attention_implementation == "flash_attention_2":
             try:
-                with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
+                # Use new API for PyTorch 2.5+
+                from torch.nn.attention import sdpa_kernel, SDPBackend
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
                     y = torch.nn.functional.scaled_dot_product_attention(
                         q, k, v, attn_mask=attn_bias, dropout_p=0.0, is_causal=(attn_bias is None)
                     )
-            except RuntimeError:
+            except (ImportError, RuntimeError):
+                # Fallback for older PyTorch versions or unsupported hardware
                 y = torch.nn.functional.scaled_dot_product_attention(
                     q, k, v, attn_mask=attn_bias, dropout_p=0.0, is_causal=(attn_bias is None)
                 )
