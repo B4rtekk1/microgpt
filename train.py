@@ -1130,7 +1130,7 @@ TRAINING_PIPELINE = [
     PipelineStage(
         name="Language & Facts", 
         dataset="local:fineweb2",  # Use local dataset
-        steps=15000, 
+        steps=12000, 
         lr=8e-4, 
         data_size_gb=0.1,  # 100MB - change to 10.0 for full training
         eval_prompt="in 1996"
