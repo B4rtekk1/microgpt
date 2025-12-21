@@ -50,7 +50,7 @@ class ModelConfig:
 
     dropout_rate: float
     max_position_embeddings: int
-    base: int
+    base: int = 10000
 
     variance_epsilon: float = 1e-9
     use_checkpoints: Optional[bool] = True

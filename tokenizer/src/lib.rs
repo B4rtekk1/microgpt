@@ -18,7 +18,17 @@ static PRE_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 // Special token IDs
-const SPECIAL_TOKENS: &[&str] = &["<PAD>", "<UNK>", "<BOS>", "<EOS>", "<|system|>"];
+const SPECIAL_TOKENS: &[&str] = &[
+    "<PAD>",
+    "<UNK>",
+    "<BOS>",
+    "<EOS>",
+    "<|system|>",
+    "[INST]",
+    "[/INST]",
+    "<|thought|>",
+    "<|solution|>",
+];
 const NUM_BYTE_TOKENS: usize = 256;
 
 // Trie for fast token lookup

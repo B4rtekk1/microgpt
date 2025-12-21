@@ -473,9 +473,7 @@ class Trainer:
         with self.logger.timer("Data Preparation"):
             loader = DatasetLoader()
             stage = self.training_config.dataset_stage
-            # Sanitize stage name for Windows (no colons in folder names)
-            cache_stage_name = stage.replace(":", "_")
-            data_dir = current_dir / "data_cache" / cache_stage_name
+            data_dir = current_dir / "data_cache" / stage
             data_dir.mkdir(parents=True, exist_ok=True)
             
             train_bin = data_dir / "train.bin"
@@ -1089,14 +1087,14 @@ class Trainer:
 # CONFIGURATION
 # =============================================================================
 
-VOCAB_SIZE = 4000
-SEQUENCE_LENGTH = 512
-NUM_LAYERS = 6
-N_HEADS = 6
-N_KV_HEADS = 6
-N_EMBD = 384
+VOCAB_SIZE = 32000
+SEQUENCE_LENGTH = 4096
+NUM_LAYERS = 24
+N_HEADS = 32
+N_KV_HEADS = 32
+N_EMBD = 4096
 DROPOUT_RATE = 0.1
-MAX_POSITION_EMBEDDINGS = 512
+MAX_POSITION_EMBEDDINGS = 4096
 ROPE_BASE = 10000
 
 USE_CHECKPOINTS = True
@@ -1118,48 +1116,14 @@ MAX_EPOCHS = 10
 TARGET_HOURS = 5.0
 
 DATASET_STAGE = "pipeline"
-DATA_SIZE_GB = None  # Use per-stage sizes in pipeline
-DATA_SIZE_MB = 100   # Default: 100MB (for quick tests)
+DATA_SIZE_GB = 1.0
+DATA_SIZE_MB = 1000
 
-# Pipeline with LOCAL datasets (use after running download_datasets.py)
-# Change "local:" prefix to use HuggingFace directly if needed
 TRAINING_PIPELINE = [
-    # Pretraining on FineWeb2 (10GB available locally)
-    PipelineStage(
-        name="Language & Facts", 
-        dataset="local:fineweb2",  # Use local dataset
-        steps=100, 
-        lr=8e-4, 
-        data_size_gb=0.1,  # 100MB - change to 10.0 for full training
-        eval_prompt="in 1996"
-    ),
-    # Math reasoning (50MB available locally)
-    PipelineStage(
-        name="Mathematics", 
-        dataset="local:math-sft",  # Use local dataset
-        steps=30, 
-        lr=4e-4, 
-        data_size_gb=0.05,  # 50MB
-        eval_prompt="2+2*2="
-    ),
-    # Instruction tuning (50MB available locally)
-    PipelineStage(
-        name="SFT", 
-        dataset="local:sft-ultra",  # Use local dataset
-        steps=20, 
-        lr=2e-5, 
-        data_size_gb=0.05,  # 50MB
-        eval_prompt="[INST] What is the capital of France? [/INST]"
-    ),
-    # Chain-of-thought (50MB available locally)
-    PipelineStage(
-        name="Chain-of-Thought", 
-        dataset="local:math-sft-plus",  # Use local dataset
-        steps=10, 
-        lr=1e-5, 
-        data_size_gb=0.05,  # 50MB
-        eval_prompt="[INST] Solve 15*13. <|thought|> [/INST]"
-    ),
+    PipelineStage(name="Language & Facts", dataset="base",           steps=60000, lr=8e-4, data_size_gb=30.0,  eval_prompt="in 1996"),
+    PipelineStage(name="Mathematics",      dataset="math-sft",       steps=2300,  lr=4e-4, data_size_gb=1.0,   eval_prompt="2+2*2="),
+    PipelineStage(name="SFT",              dataset="sft-ultra",      steps=2300,  lr=2e-5, data_size_gb=1.0,   eval_prompt="[INST] What is the capital of France? [/INST]"),
+    PipelineStage(name="Chain-of-Thought", dataset="math-sft-plus",  steps=2300,  lr=1e-5, data_size_gb=1.0,   eval_prompt="[INST] Solve 15*13. <|thought|> [/INST]"),
 ]
 
 BATCH_SIZE = 32

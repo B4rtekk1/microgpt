@@ -613,8 +613,23 @@ class TrainingLogger(ArchitectureLogger):
 
         if self.log_dir:
             config_file = self.log_dir / f"{self.name}_config.json"
+            
+            def make_serializable(obj):
+                if isinstance(obj, (str, int, float, bool, type(None))):
+                    return obj
+                elif isinstance(obj, list):
+                    return [make_serializable(item) for item in obj]
+                elif isinstance(obj, dict):
+                    return {str(k): make_serializable(v) for k, v in obj.items()}
+                elif hasattr(obj, '__dataclass_fields__'):
+                    return {k: make_serializable(getattr(obj, k)) for k in obj.__dataclass_fields__.keys()}
+                elif hasattr(obj, '__dict__'):
+                    return {k: make_serializable(v) for k, v in vars(obj).items()}
+                else:
+                    return str(obj)
+
             with open(config_file, 'w', encoding='utf-8') as f:
-                serializable = {k: (v if isinstance(v, (str, int, float, bool, list, dict)) else str(v)) for k, v in config_dict.items()}
+                serializable = make_serializable(config_dict)
                 json.dump(serializable, f, indent=4)
     
 
