@@ -1128,7 +1128,7 @@ TRAINING_PIPELINE = [
     PipelineStage(
         name="Language & Facts", 
         dataset="local:fineweb2",  # Use local dataset
-        steps=100, 
+        steps=50000, 
         lr=8e-4, 
         data_size_gb=0.1,  # 100MB - change to 10.0 for full training
         eval_prompt="in 1996"
@@ -1137,7 +1137,7 @@ TRAINING_PIPELINE = [
     PipelineStage(
         name="Mathematics", 
         dataset="local:math-sft",  # Use local dataset
-        steps=30, 
+        steps=10000, 
         lr=4e-4, 
         data_size_gb=0.05,  # 50MB
         eval_prompt="2+2*2="
@@ -1146,7 +1146,7 @@ TRAINING_PIPELINE = [
     PipelineStage(
         name="SFT", 
         dataset="local:sft-ultra",  # Use local dataset
-        steps=20, 
+        steps=10000, 
         lr=2e-5, 
         data_size_gb=0.05,  # 50MB
         eval_prompt="[INST] What is the capital of France? [/INST]"
@@ -1155,7 +1155,7 @@ TRAINING_PIPELINE = [
     PipelineStage(
         name="Chain-of-Thought", 
         dataset="local:math-sft-plus",  # Use local dataset
-        steps=10, 
+        steps=10000, 
         lr=1e-5, 
         data_size_gb=0.05,  # 50MB
         eval_prompt="[INST] Solve 15*13. <|thought|> [/INST]"
