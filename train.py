@@ -1007,7 +1007,6 @@ class Trainer:
                     "lr": lr,
                     "tokens_per_sec": tokens_per_sec,
                     "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else float(grad_norm),
-                    "stage": stage_name,
                 }
                 
                 self.loss_history.append({'step': step, 'loss': loss.item(), 'ppl': ppl, 'stage': stage_name})
