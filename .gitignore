@@ -15,3 +15,5 @@ train_simple.py
 train_custom.py
 /dataset
 /data_cache
+train_distributed.py
+train.py

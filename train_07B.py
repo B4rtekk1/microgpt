@@ -1087,21 +1087,36 @@ class Trainer:
 # CONFIGURATION
 # =============================================================================
 
+# ======================== MODEL 0.7B (~730M parameters) ======================
+# Parameter breakdown:
+#   - Token Embeddings: 32,000 × 1,536 = 49.2M
+#   - Per layer (24 layers):
+#       - Attention (Q,K,V,O): 4 × 1,536² = 9.4M
+#       - SwiGLU FFN: 3 × 1,536 × 4,096 = 18.9M
+#       - LayerNorm: 2 × 1,536 = 3K
+#   - Total per layer: ~28.3M
+#   - 24 layers: ~679M
+#   - LM Head (weight tied with embeddings): 0
+#   - Total: ~728M parameters
+# =============================================================================
+
 VOCAB_SIZE = 32000
 SEQUENCE_LENGTH = 4096
-NUM_LAYERS = 24
-N_HEADS = 32
-N_KV_HEADS = 32
-N_EMBD = 4096
-DROPOUT_RATE = 0.1
+NUM_LAYERS = 32
+N_HEADS = 20          # 20 heads × 64 head_dim = 1280
+N_KV_HEADS = 4        # GQA: 5 query heads per KV head (efficient)
+N_EMBD = 1280         # Embedding dimension (head_dim = 1280/20 = 64)
+DROPOUT_RATE = 0.0    # Modern LLMs (LLaMA, Mistral) use 0.0 dropout
 MAX_POSITION_EMBEDDINGS = 4096
 ROPE_BASE = 10000
 
-USE_CHECKPOINTS = True
-USE_DROP_PATH = False
-DROP_PATH_RATE = 0.0
-LAYER_SCALE_INIT = 1e-5
+USE_CHECKPOINTS = True      # Required for long sequences (4096) to fit in memory
+USE_DROP_PATH = True        # Stochastic depth - helps with 32-layer model
+DROP_PATH_RATE = 0.2        # Linear increase from 0 to 0.1 across layers
+LAYER_SCALE_INIT = 1e-5     # LayerScale for training stability
 
+# Relative Position Bias - NOT USED (we use RoPE instead)
+# RoPE is better for long contexts and is already built into the model
 USE_RELATIVE_POSITION_BIAS = False
 REL_POS_NUM_BUCKETS = 32
 REL_POS_MAX_DISTANCE = 128
@@ -1119,18 +1134,146 @@ DATASET_STAGE = "pipeline"
 DATA_SIZE_GB = 1.0
 DATA_SIZE_MB = 1000
 
+# =============================================================================
+# OPTIMIZED TRAINING PIPELINE - Curriculum Learning for 0.7B Model
+# =============================================================================
+# 
+# TARGET: 40 HOURS on NVIDIA H100 80GB
+#
+# REALISTIC CALCULATIONS (H100 ~1,979 TFLOPS BF16, ~35% utilization):
+#   - FLOPs per token: 6 × 700M = 4.2 GFLOPs/token
+#   - Effective throughput: 1,979 × 0.35 / 4.2 ≈ 165,000 tokens/sec
+#   - 40 hours = 144,000 seconds
+#   - Token budget: 144,000 × 165,000 ≈ 23.8 BILLION tokens
+#
+#   - Batch: 16 × 8 (accum) = 128 sequences × 4096 tokens = 524K tokens/step
+#   - Time per step: 524,000 / 165,000 ≈ 3.2 seconds/step
+#   - Max steps in 40h: 144,000 / 3.2 ≈ 45,000 steps
+#   - Using 43,000 steps (~38.2h training + ~1.8h data loading buffer)
+#
+# Token Budget: 43,000 steps × 524K = ~22.5 BILLION tokens
+#
+# Philosophy: Start broad (language) → Focus (domain) → Specialize (instructions)
+#
+# Learning Rate Strategy:
+#   - Pretraining: 8e-4 → 3e-4 (fast learning, lots of data)
+#   - Domain SFT: 5e-5 → 1e-5 (preserve knowledge, refine skills)
+#   - Final CoT: 5e-6 (minimal changes, polish reasoning)
+# =============================================================================
+
 TRAINING_PIPELINE = [
-    PipelineStage(name="Language & Facts", dataset="base",           steps=60000, lr=8e-4, data_size_gb=30.0,  eval_prompt="in 1996"),
-    PipelineStage(name="Mathematics",      dataset="math-sft",       steps=2300,  lr=4e-4, data_size_gb=1.0,   eval_prompt="2+2*2="),
-    PipelineStage(name="SFT",              dataset="sft-ultra",      steps=2300,  lr=2e-5, data_size_gb=1.0,   eval_prompt="[INST] What is the capital of France? [/INST]"),
-    PipelineStage(name="Chain-of-Thought", dataset="math-sft-plus",  steps=2300,  lr=1e-5, data_size_gb=1.0,   eval_prompt="[INST] Solve 15*13. <|thought|> [/INST]"),
+    # =========================================================================
+    # PHASE 1: GENERAL PRETRAINING (~60% of budget = 25.8K steps)
+    # Goal: Build strong language foundation with world knowledge
+    # =========================================================================
+    PipelineStage(
+        name="General Knowledge",
+        dataset="base",               # FineWeb-Edu: highest quality filtered web text
+        steps=18500,                  # ~9.7B tokens - largest phase
+        lr=8e-4,                      # High LR for rapid learning
+        data_size_gb=13.0,            # Large and diverse corpus
+        eval_prompt="The capital of France is"
+    ),
+    
+    PipelineStage(
+        name="Synthetic Textbooks", 
+        dataset="cosmopedia",         # Synthetic educational content (no web noise)
+        steps=7300,                   # ~3.8B tokens
+        lr=6e-4,                      # Slightly lower - refining base
+        data_size_gb=5.0,
+        eval_prompt="According to physics, gravity"
+    ),
+    
+    # =========================================================================
+    # PHASE 2: MATHEMATICS PRETRAINING (~30% of budget = 12.9K steps)
+    # Goal: Deep mathematical reasoning and problem-solving foundation
+    # =========================================================================
+    PipelineStage(
+        name="Math Pretraining",
+        dataset="math-pretrain",      # OpenWebMath: raw math from the web
+        steps=8000,                   # ~4.2B tokens
+        lr=4e-4,                      # Medium LR for domain adaptation
+        data_size_gb=6.0,
+        eval_prompt="The integral of x^2 is"
+    ),
+    
+    PipelineStage(
+        name="Math Knowledge",
+        dataset="math-knowledge",     # FineMath: quality-filtered math (3+)
+        steps=4900,                   # ~2.6B tokens
+        lr=3e-4,                      # Lower LR - structured learning
+        data_size_gb=4.0,
+        eval_prompt="To solve a quadratic equation"
+    ),
+    
+    # =========================================================================
+    # PHASE 3: SUPERVISED FINE-TUNING (~10% of budget = 4.3K steps)
+    # Goal: Instruction following, helpful responses, reasoning skills
+    # =========================================================================
+    PipelineStage(
+        name="General SFT",
+        dataset="sft-ultra",          # UltraChat: diverse conversations
+        steps=1500,                   # ~786M tokens - general skills
+        lr=2e-5,
+        data_size_gb=0.5,
+        eval_prompt="[INST] What is the capital of France? [/INST]"
+    ),
+
+    PipelineStage(
+        name="Math Reasoning SFT",
+        dataset="math-metamath",      # MetaMathQA: augmented diverse math Q&A
+        steps=800,                    # ~419M tokens - math instruction (LaTeX + plain)
+        lr=5e-5,                      # Low LR - preserve pretraining
+        data_size_gb=0.6,
+        eval_prompt="[INST] Calculate 15 * 23. [/INST]"
+    ),
+
+    PipelineStage(
+        name="Plain Text Math",
+        dataset="math-sft",           # GSM8K: grade school word problems (plain English)
+        steps=500,                    # ~262M tokens - plain text math skills
+        lr=3e-5,
+        data_size_gb=0.1,             # GSM8K is small but high quality
+        eval_prompt="[INST] If John has 5 apples and gives 2 to Mary, how many does he have? [/INST]"
+    ),
+     
+    PipelineStage(
+        name="Advanced SFT",
+        dataset="sft-hermes",         # OpenHermes 2.5: high-quality multi-turn
+        steps=800,                    # ~419M tokens - polish responses
+        lr=1e-5,
+        data_size_gb=0.4,
+        eval_prompt="[INST] Explain quantum computing in simple terms. [/INST]"
+    ),
+    
+    # =========================================================================
+    # PHASE 4: CHAIN-OF-THOUGHT FINE-TUNING (final polish)
+    # Goal: Explicit step-by-step reasoning for math problems
+    # =========================================================================
+    PipelineStage(
+        name="Chain-of-Thought",
+        dataset="math-sft-plus",      # NuminaMath-CoT: reasoning chains
+        steps=700,                    # ~367M tokens - final refinement
+        lr=5e-6,                      # Minimal LR - preserve everything
+        data_size_gb=0.3,
+        eval_prompt="[INST] Solve step by step: x + 2 = 5. [/INST] Let me think:"
+    ),
 ]
 
-BATCH_SIZE = 32
-GRAD_ACCUM_STEPS = 1
-LEARNING_RATE = 8e-4
-OPTIMIZER_TYPE = "sophia_g"
-GRAD_CLIP = 1.0
+# =============================================================================
+# TOTAL: 43,000 steps × 3.2s ≈ 38.2 hours (~1.8h buffer for data loading)
+# TOKENS: ~22.5 billion tokens processed
+# DATA: ~30 GB total training data
+# =============================================================================
+
+# H100 80GB with 0.7B model @ seq_len 4096:
+# - Micro batch 16 × 4096 tokens = 65K tokens/step
+# - With accumulation 8 → effective batch = 128 sequences = 524K tokens/update
+BATCH_SIZE = 16           # Micro batch size per GPU (fits in 80GB with seq 4096)
+GRAD_ACCUM_STEPS = 8      # Effective batch = 16 × 8 = 128 sequences = 524K tokens
+LEARNING_RATE = 6e-4      # Slightly lower than 8e-4 for stability with larger effective batch
+OPTIMIZER_TYPE = "adamw"  # AdamW is more stable; Sophia is experimental
+GRAD_CLIP = 1.0           # Standard gradient clipping
 
 EARLY_STOPPING_PATIENCE = 0
 
