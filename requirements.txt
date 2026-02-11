@@ -1,23 +1,19 @@
-# Core
-#torch==2.9.1+cu130
+# Core (PyTorch install osobno z --index-url dla CUDA)
+# pip3 install torch --index-url https://download.pytorch.org/whl/cu129
 numpy
-typing_extensions
 
-# Data loading
+# Data loading (HuggingFace)
 datasets
 tqdm
 
-# Tokenizer
-sentencepiece
+# Tokenizer fallback (when Rust unitokenizer not available)
+tokenizers
 
 # Logging & Visualization
 wandb
 tensorboard
-matplotlib
 
-# Optional (for model visualization)
+# Optional
+torchvision
 torchviz
-graphviz
-
-# HTTP requests (for API/scraping if needed)
 requests

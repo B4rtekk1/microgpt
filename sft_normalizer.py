@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 class SFTNormalizer:
     """Normalizes various SFT dataset formats to a unified instruction format."""
     
-    # Token definitions - can be customized per tokenizer
+    # Token definitions - must match tokenizer/src/lib.rs SPECIAL_TOKENS
     INST_START = "[INST]"
     INST_END = "[/INST]"
-    SYS_START = "<<SYS>>"
-    SYS_END = "<</SYS>>"
+    SYS_START = "<|system|>"
+    SYS_END = "<|system|>"
     
     # Dataset format mappings
     DATASET_FORMATS = {
@@ -44,7 +44,7 @@ class SFTNormalizer:
         "generic": "auto"
     }
     
-    def __init__(self, add_eos: bool = True, eos_token: str = "</s>"):
+    def __init__(self, add_eos: bool = True, eos_token: str = "<EOS>"):
         """
         Initialize the normalizer.
         

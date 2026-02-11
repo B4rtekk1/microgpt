@@ -5,15 +5,17 @@ use std::sync::Arc;
 
 use ahash::{AHashMap, AHashSet};
 use compact_str::CompactString;
-use fancy_regex::Regex;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3_log;
+use rayon::prelude::*;
+use regex::Regex;
 
+// Linear-time regex (O(n), no backtracking) — safe for math/LaTeX text
 static PRE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+")
+    Regex::new(r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]|\s+")
         .expect("valid regex")
 });
 
@@ -30,6 +32,17 @@ const SPECIAL_TOKENS: &[&str] = &[
     "<|solution|>",
 ];
 const NUM_BYTE_TOKENS: usize = 256;
+const MAX_TRIE_MATCH_LEN: usize = 64;
+const MAX_ENCODE_CACHE_ENTRIES: usize = 200_000;
+const MAX_ENCODE_RESERVE: usize = 1_048_576;
+const TRAIN_BUFFER_SIZE: usize = 1 << 20;
+const TRAIN_MAX_WORD_TYPES_MULTIPLIER: usize = 64;
+const TRAIN_MIN_WORD_TYPES: usize = 200_000;
+const TRAIN_MAX_CANDIDATE_TYPES_MULTIPLIER: usize = 32;
+const TRAIN_MIN_CANDIDATE_TYPES: usize = 300_000;
+const TRAIN_PRUNE_WATERMARK_MULTIPLIER: usize = 2;
+const TRAIN_MAX_SUBSTRING_LEN: usize = 20;
+const TRAIN_MAX_WORD_LEN: usize = 128;
 
 // Trie for fast token lookup
 #[derive(Default)]
@@ -79,8 +92,9 @@ impl ByteTrie {
     fn longest_prefix_match(&self, text: &[u8], start: usize) -> Option<(u32, usize)> {
         let mut best = None;
         let mut node = &self.root;
+        let end = text.len().min(start + MAX_TRIE_MATCH_LEN);
 
-        for i in start..text.len().min(start + 64) {
+        for i in start..end {
             let b = text[i];
             if let Some(ref child) = node.children[b as usize] {
                 if let Some(id) = child.value {
@@ -105,7 +119,7 @@ pub struct UnigramTokenizer {
     scores: Vec<f64>,
     special_tokens: AHashMap<CompactString, u32>,
     compiled_pattern: Regex,
-    encode_cache: Arc<RwLock<AHashMap<Arc<[u8]>, Vec<u32>>>>,
+    encode_cache: Arc<RwLock<AHashMap<Box<[u8]>, Box<[u32]>>>>,
     trie: ByteTrie,
 }
 
@@ -143,8 +157,18 @@ impl UnigramTokenizer {
         self.encode_internal(data)
     }
 
+    fn encode_batch(&self, py: Python<'_>, batch: Vec<Vec<u8>>) -> Vec<Vec<u32>> {
+        py.detach(|| {
+            batch
+                .into_par_iter()
+                .map(|data| self.encode_internal(data))
+                .collect()
+        })
+    }
+
     fn decode(&self, tokens: Vec<u32>) -> Vec<u8> {
-        let mut bytes_out: Vec<u8> = Vec::with_capacity(tokens.len() * 2);
+        let mut bytes_out: Vec<u8> =
+            Vec::with_capacity(tokens.len().saturating_mul(2).min(MAX_ENCODE_RESERVE));
         for &id in &tokens {
             if let Some(token_bytes) = self.vocab.get(id as usize) {
                 bytes_out.extend_from_slice(token_bytes);
@@ -202,10 +226,6 @@ impl UnigramTokenizer {
         self.special_tokens.len() + NUM_BYTE_TOKENS
     }
 
-    fn get_byte_token_id(&self, byte: u8) -> u32 {
-        self.special_tokens.len() as u32 + byte as u32
-    }
-
     fn viterbi_encode(&self, text: &[u8]) -> Vec<u32> {
         let n = text.len();
         if n == 0 {
@@ -214,29 +234,34 @@ impl UnigramTokenizer {
 
         let mut best_score = vec![f64::NEG_INFINITY; n + 1];
         let mut best_path_token = vec![0u32; n + 1];
+        let mut best_path_len = vec![0usize; n + 1];
         best_score[0] = 0.0;
+        let byte_token_base = self.special_tokens.len() as u32;
+        let scores = &self.scores;
 
         for i in 0..n {
-            if best_score[i].is_infinite() && best_score[i] < 0.0 {
+            if best_score[i] == f64::NEG_INFINITY {
                 continue;
             }
 
             // Try to find longest matching token from trie
             if let Some((token_id, token_len)) = self.trie.longest_prefix_match(text, i) {
                 let j = i + token_len;
-                let score = best_score[i] + self.scores[token_id as usize];
+                let score = best_score[i] + scores[token_id as usize];
                 if score > best_score[j] {
                     best_score[j] = score;
                     best_path_token[j] = token_id;
+                    best_path_len[j] = token_len;
                 }
             }
 
             // Fallback: single byte token
-            let byte_id = self.get_byte_token_id(text[i]);
-            let score = best_score[i] + self.scores.get(byte_id as usize).copied().unwrap_or(-10.0);
+            let byte_id = byte_token_base + text[i] as u32;
+            let score = best_score[i] + scores[byte_id as usize];
             if score > best_score[i + 1] {
                 best_score[i + 1] = score;
                 best_path_token[i + 1] = byte_id;
+                best_path_len[i + 1] = 1;
             }
         }
 
@@ -248,8 +273,15 @@ impl UnigramTokenizer {
             let token_id = best_path_token[pos];
             result.push(token_id);
 
-            let token_len = self.vocab[token_id as usize].len();
-            pos = pos.saturating_sub(token_len);
+            let mut token_len = best_path_len[pos];
+            if token_len == 0 {
+                token_len = self
+                    .vocab
+                    .get(token_id as usize)
+                    .map(|piece| piece.len().max(1))
+                    .unwrap_or(1);
+            }
+            pos -= token_len.min(pos);
         }
 
         result.reverse();
@@ -257,26 +289,24 @@ impl UnigramTokenizer {
     }
 
     fn encode_internal(&self, data: Vec<u8>) -> Vec<u32> {
-        let mut result: Vec<u32> = Vec::with_capacity(data.len());
+        let mut result: Vec<u32> = Vec::with_capacity(data.len().min(MAX_ENCODE_RESERVE));
         let text = String::from_utf8_lossy(&data);
 
         for mat in self.compiled_pattern.find_iter(&text) {
-            let piece = mat.expect("regex failed").as_str();
-            let piece_cs = CompactString::from(piece);
+            let piece = mat.as_str();
 
             // Check for special tokens
-            if let Some(&id) = self.special_tokens.get(&piece_cs) {
+            if let Some(&id) = self.special_tokens.get(piece) {
                 result.push(id);
                 continue;
             }
 
             let piece_bytes = piece.as_bytes();
-            let piece_arc = Arc::<[u8]>::from(piece_bytes);
 
             // Check cache
             {
                 let cache_r = self.encode_cache.read();
-                if let Some(cached) = cache_r.get(&piece_arc) {
+                if let Some(cached) = cache_r.get(piece_bytes) {
                     result.extend_from_slice(cached);
                     continue;
                 }
@@ -284,15 +314,152 @@ impl UnigramTokenizer {
 
             // Encode and cache
             let encoded = self.viterbi_encode(piece_bytes);
-
+            result.extend_from_slice(&encoded);
             {
                 let mut cache_w = self.encode_cache.write();
-                cache_w.insert(piece_arc, encoded.clone());
+                if cache_w.len() >= MAX_ENCODE_CACHE_ENTRIES {
+                    cache_w.clear();
+                }
+                cache_w.insert(
+                    Box::<[u8]>::from(piece_bytes),
+                    encoded.into_boxed_slice(),
+                );
             }
-
-            result.extend(encoded);
         }
         result
+    }
+
+    fn prune_top_k_counts(map: &mut AHashMap<Arc<[u8]>, i64>, keep: usize) {
+        if keep == 0 || map.len() <= keep {
+            return;
+        }
+
+        let mut entries: Vec<(Arc<[u8]>, i64)> = map.drain().collect();
+        entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        entries.truncate(keep);
+        map.extend(entries);
+    }
+
+    fn merge_counts_bounded(
+        dst: &mut AHashMap<Arc<[u8]>, i64>,
+        src: AHashMap<Arc<[u8]>, i64>,
+        cap: usize,
+    ) {
+        for (k, v) in src {
+            *dst.entry(k).or_default() += v;
+        }
+
+        if dst.len() > cap.saturating_mul(TRAIN_PRUNE_WATERMARK_MULTIPLIER) {
+            Self::prune_top_k_counts(dst, cap);
+        }
+    }
+
+    fn count_words_batch(lines: &[String]) -> AHashMap<Arc<[u8]>, i64> {
+        lines
+            .par_iter()
+            .fold(
+                || AHashMap::new(),
+                |mut local_counts: AHashMap<Arc<[u8]>, i64>, line| {
+                    for mat in PRE_REGEX.find_iter(line.as_str()) {
+                        let piece = mat.as_str().as_bytes();
+                        if piece.is_empty() || piece.len() > TRAIN_MAX_WORD_LEN {
+                            continue;
+                        }
+
+                        *local_counts.entry(Arc::<[u8]>::from(piece)).or_default() += 1;
+                    }
+                    local_counts
+                },
+            )
+            .reduce(
+                || AHashMap::new(),
+                |mut a, b| {
+                    for (k, v) in b {
+                        *a.entry(k).or_default() += v;
+                    }
+                    a
+                },
+            )
+    }
+
+    fn stream_word_counts(
+        &self,
+        file_path: &str,
+        max_word_types: usize,
+    ) -> PyResult<AHashMap<Arc<[u8]>, i64>> {
+        let file = File::open(file_path)?;
+        let reader = BufReader::with_capacity(TRAIN_BUFFER_SIZE, file);
+
+        let mut global_counts: AHashMap<Arc<[u8]>, i64> = AHashMap::new();
+        let mut batch: Vec<String> = Vec::with_capacity(8192);
+
+        for line in reader.lines() {
+            let line = line?;
+            if !line.is_empty() {
+                batch.push(line);
+            }
+
+            if batch.len() >= batch.capacity() {
+                let local_counts = Self::count_words_batch(&batch);
+                Self::merge_counts_bounded(&mut global_counts, local_counts, max_word_types);
+                batch.clear();
+            }
+        }
+
+        if !batch.is_empty() {
+            let local_counts = Self::count_words_batch(&batch);
+            Self::merge_counts_bounded(&mut global_counts, local_counts, max_word_types);
+        }
+
+        Self::prune_top_k_counts(&mut global_counts, max_word_types);
+        Ok(global_counts)
+    }
+
+    fn collect_candidates(
+        &self,
+        words: &[(Arc<[u8]>, i64)],
+        max_candidate_types: usize,
+    ) -> AHashMap<Arc<[u8]>, i64> {
+        let thread_count = rayon::current_num_threads().max(1);
+        let per_thread_cap = (max_candidate_types / thread_count).max(10_000);
+
+        let mut candidates: AHashMap<Arc<[u8]>, i64> = words
+            .par_iter()
+            .fold(
+                || AHashMap::new(),
+                |mut local_cands: AHashMap<Arc<[u8]>, i64>, (word, count)| {
+                    let bytes = word.as_ref();
+                    let max_len = bytes.len().min(TRAIN_MAX_SUBSTRING_LEN);
+                    if max_len < 2 {
+                        return local_cands;
+                    }
+
+                    for len in 2..=max_len {
+                        for start in 0..=(bytes.len() - len) {
+                            let span = &bytes[start..start + len];
+                            *local_cands.entry(Arc::<[u8]>::from(span)).or_default() += *count;
+                        }
+                    }
+
+                    if local_cands.len()
+                        > per_thread_cap.saturating_mul(TRAIN_PRUNE_WATERMARK_MULTIPLIER)
+                    {
+                        Self::prune_top_k_counts(&mut local_cands, per_thread_cap);
+                    }
+
+                    local_cands
+                },
+            )
+            .reduce(
+                || AHashMap::new(),
+                |mut a, b| {
+                    Self::merge_counts_bounded(&mut a, b, max_candidate_types);
+                    a
+                },
+            );
+
+        Self::prune_top_k_counts(&mut candidates, max_candidate_types);
+        candidates
     }
 
     fn reset_to_base_vocab(&mut self) {
@@ -311,14 +478,29 @@ impl UnigramTokenizer {
 
     fn compute_em_step(&self, words: &[(Arc<[u8]>, i64)]) -> Vec<f64> {
         let vocab_len = self.vocab.len();
-        let mut expected_freq: Vec<f64> = vec![0.0; vocab_len];
 
-        for (word, count) in words {
-            let encoding = self.viterbi_encode(word);
-            for &token_id in &encoding {
-                expected_freq[token_id as usize] += *count as f64;
-            }
-        }
+        // Parallel fold+reduce: each rayon thread accumulates local freq vector
+        let expected_freq: Vec<f64> = words
+            .par_iter()
+            .fold(
+                || vec![0.0f64; vocab_len],
+                |mut local_freq, (word, count)| {
+                    let encoding = self.viterbi_encode(word);
+                    for &token_id in &encoding {
+                        local_freq[token_id as usize] += *count as f64;
+                    }
+                    local_freq
+                },
+            )
+            .reduce(
+                || vec![0.0f64; vocab_len],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(b.iter()) {
+                        *x += *y;
+                    }
+                    a
+                },
+            );
 
         let total: f64 = expected_freq.iter().sum();
         if total > 0.0 {
@@ -383,38 +565,25 @@ impl UnigramTokenizer {
     ) -> PyResult<()> {
         self.reset_to_base_vocab();
 
-        // Load and count words
-        let file = File::open(&file_path)?;
-        let reader = BufReader::new(file);
-        let mut word_counts: AHashMap<Arc<[u8]>, i64> = AHashMap::new();
+        let max_word_types = (target_vocab_size.saturating_mul(TRAIN_MAX_WORD_TYPES_MULTIPLIER))
+            .max(TRAIN_MIN_WORD_TYPES);
+        let max_candidate_types = (target_vocab_size
+            .saturating_mul(TRAIN_MAX_CANDIDATE_TYPES_MULTIPLIER))
+        .max(TRAIN_MIN_CANDIDATE_TYPES);
 
-        for line in reader.lines() {
-            let line = line?;
-            for mat in PRE_REGEX.find_iter(&line) {
-                if let Ok(m) = mat {
-                    let piece = m.as_str().as_bytes();
-                    if !piece.is_empty() {
-                        *word_counts.entry(Arc::<[u8]>::from(piece)).or_default() += 1;
-                    }
-                }
-            }
-        }
-
-        let words: Vec<(Arc<[u8]>, i64)> = word_counts
+        let mut words: Vec<(Arc<[u8]>, i64)> = self
+            .stream_word_counts(&file_path, max_word_types)?
             .into_iter()
             .filter(|(_, count)| *count >= min_freq as i64)
             .collect();
 
-        // Collect candidate substrings
-        let mut candidates: AHashMap<Arc<[u8]>, i64> = AHashMap::new();
-        for (word, count) in &words {
-            for len in 2..=word.len().min(20) {
-                for start in 0..=(word.len() - len) {
-                    let substr = Arc::<[u8]>::from(&word[start..start + len]);
-                    *candidates.entry(substr).or_default() += count;
-                }
-            }
+        if words.is_empty() {
+            return Ok(());
         }
+
+        words.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+        let candidates = self.collect_candidates(&words, max_candidate_types);
 
         // Sort candidates by frequency
         let mut candidates_vec: Vec<(Arc<[u8]>, f64)> = candidates
@@ -425,9 +594,9 @@ impl UnigramTokenizer {
 
         candidates_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
-        // Seed vocabulary
+        // Seed vocabulary — start with 4x target so EM+pruning can converge to target_vocab_size
         let base_size = self.base_vocab_size();
-        let seed_size = target_vocab_size.saturating_sub(base_size).min(8000);
+        let seed_size = (target_vocab_size * 4).saturating_sub(base_size);
         for (piece, score) in candidates_vec.into_iter().take(seed_size) {
             let id = self.vocab.len() as u32;
             self.vocab.push(piece.to_vec());
@@ -452,11 +621,12 @@ impl UnigramTokenizer {
 
     fn load_vocab(&mut self, vocab_file: &str) -> PyResult<()> {
         let file = File::open(vocab_file)?;
-        let reader = BufReader::new(file);
+        let reader = BufReader::with_capacity(TRAIN_BUFFER_SIZE, file);
 
         self.vocab.clear();
         self.scores.clear();
         self.trie.clear();
+        self.encode_cache.write().clear();
 
         // Collect special tokens data before mutating self
         let special_tokens_data: Vec<(Vec<u8>, u32)> = self
@@ -489,13 +659,16 @@ impl UnigramTokenizer {
                 continue;
             }
 
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 2 {
+            let mut parts = line.splitn(2, '\t');
+            let Some(piece_str) = parts.next() else {
                 continue;
-            }
+            };
+            let Some(score_str) = parts.next() else {
+                continue;
+            };
 
-            let piece = parts[0].as_bytes().to_vec();
-            let score: f64 = parts[1].parse().unwrap_or(0.0);
+            let piece = piece_str.as_bytes().to_vec();
+            let score: f64 = score_str.parse().unwrap_or(0.0);
 
             let id = self.vocab.len() as u32;
             self.vocab.push(piece.clone());

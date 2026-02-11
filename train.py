@@ -109,7 +109,7 @@ class TrainingConfig:
     
     log_interval: int = 10
     eval_interval: int = 100
-    checkpoint_interval: int = 500
+    checkpoint_interval: int = 1000
     log_dir: str = "./logs"
     
     data_size_mb: int = 1000
@@ -529,11 +529,16 @@ class Trainer:
             last_pbar_val = 0
             
             for item in iterator:
-                # Use SFT formatting for all SFT-related datasets
-                if "sft" in stage.lower() or "math" in stage.lower():
+                # Local datasets are already pre-formatted by download_datasets.py
+                # Just extract the 'text' field directly
+                if stage.startswith("local:"):
+                    text = item.get('text', str(item))
+                # HuggingFace datasets need formatting
+                elif "sft" in stage.lower() or "math" in stage.lower():
                     text = self._format_sft_sample(item, dataset_name=stage)
                 else:
                     text = item.get('text', str(item))
+
                 
                 text_bytes = text.encode('utf-8')
                 size = len(text_bytes)
@@ -558,11 +563,19 @@ class Trainer:
             
             if train_tokenizer:
                 tokenizer_corpus_path = current_dir / "tokenizer_corpus.txt"
-                self.logger.info(f"Writing tokenizer corpus...")
+                self.logger.info(f"Writing tokenizer corpus (max 1GB)...")
+                max_corpus_bytes = 1 * 1024 * 1024 * 1024  # 1GB limit for tokenizer training
+                corpus_bytes = 0
                 with open(tokenizer_corpus_path, "w", encoding="utf-8") as f:
                     for text in collected_texts:
                         if len(text.strip()) > 0:
-                            f.write(text + "\n")
+                            line = text + "\n"
+                            line_bytes = len(line.encode('utf-8'))
+                            if corpus_bytes + line_bytes > max_corpus_bytes:
+                                break
+                            f.write(line)
+                            corpus_bytes += line_bytes
+                self.logger.info(f"Tokenizer corpus: {corpus_bytes / (1024*1024):.0f}MB")
                 
                 try:
                     self.tokenizer = Tokenizer()
@@ -589,14 +602,39 @@ class Trainer:
                     self.logger.info(f"Reusing existing tokenizer (vocab size: {self.tokenizer.vocab_size})")
             
             self.logger.info(f"Tokenizing {stage.upper()} dataset...")
-            all_tokens = []
-            for text in tqdm(collected_texts, desc="Tokenizing"):
-                if len(text) > 0:
-                    encoded = self.tokenizer.encode(text)
-                    all_tokens.extend(encoded)
             
-            data = np.array(all_tokens, dtype=np.uint16)
-            self.logger.info(f"Total tokens: {len(data):,}")
+            # Write tokens directly to binary file to avoid massive RAM usage
+            # (25GB text -> ~6B tokens -> 170GB RAM as Python list!)
+            import array
+            temp_bin = data_dir / "tokens_temp.bin"
+            total_tokens = 0
+            
+            # Filter out empty texts
+            collected_texts = [t for t in collected_texts if len(t) > 0]
+            
+            # Use batch encoding for massive speedup with HF tokenizers
+            BATCH_SZ = 4096
+            with open(temp_bin, "wb") as token_file:
+                buf = array.array('H')  # unsigned short (uint16)
+                for i in tqdm(range(0, len(collected_texts), BATCH_SZ), 
+                              desc="Tokenizing", 
+                              total=(len(collected_texts) + BATCH_SZ - 1) // BATCH_SZ):
+                    chunk = collected_texts[i:i + BATCH_SZ]
+                    encoded_batch = self.tokenizer.encode_batch(chunk)
+                    for encoded in encoded_batch:
+                        for tok in encoded:
+                            buf.append(tok & 0xFFFF)
+                        total_tokens += len(encoded)
+                    if len(buf) >= 500_000:
+                        buf.tofile(token_file)
+                        buf = array.array('H')
+                if len(buf) > 0:
+                    buf.tofile(token_file)
+            
+            self.logger.info(f"Total tokens: {total_tokens:,}")
+            
+            # Load from file (uses only 2 bytes/token instead of 28)
+            data = np.fromfile(temp_bin, dtype=np.uint16)
             
             n = int((1 - self.training_config.val_split) * len(data))
             self.train_data = data[:n]
@@ -605,6 +643,7 @@ class Trainer:
             self.logger.info(f"Caching tokenized data to {data_dir}...")
             self.train_data.tofile(train_bin)
             self.val_data.tofile(val_bin)
+            temp_bin.unlink(missing_ok=True)
             self.logger.info("Successfully cached dataset.")
                 
     def build_model(self):
@@ -1055,6 +1094,8 @@ class Trainer:
                 self.training_logger.log_gpu_memory()
             
             if local_step > 0 and local_step % tc.checkpoint_interval == 0:
+                safe_stage = stage_name.lower().replace(" ", "_")
+                self.save_checkpoint(f"{safe_stage}_step_{local_step}")
                 self.save_checkpoint(f"latest_{stage_name.lower()}")
         
         self.current_step = start_step + max_steps
